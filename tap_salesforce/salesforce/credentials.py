@@ -1,7 +1,9 @@
 import logging
 import threading
+import time
 from collections import namedtuple
 
+import jwt
 import requests
 from simple_salesforce import SalesforceLogin
 
@@ -12,9 +14,11 @@ OAuthCredentials = namedtuple("OAuthCredentials", ("client_id", "client_secret",
 
 PasswordCredentials = namedtuple("PasswordCredentials", ("username", "password", "security_token"))
 
+JWTCredentials = namedtuple("JWTCredentials", ("jwt_client_id", "jwt_username", "jwt_private_key"))
+
 
 def parse_credentials(config):
-    for cls in reversed((OAuthCredentials, PasswordCredentials)):
+    for cls in (JWTCredentials, OAuthCredentials, PasswordCredentials):
         creds = cls(*(config.get(key) for key in cls._fields))
         if all(creds):
             return creds
@@ -56,6 +60,9 @@ class SalesforceAuth:
 
         if isinstance(credentials, PasswordCredentials):
             return SalesforceAuthPassword(credentials, **kwargs)
+
+        if isinstance(credentials, JWTCredentials):
+            return SalesforceAuthJWT(credentials, **kwargs)
 
         raise Exception("Invalid credentials")
 
@@ -110,3 +117,61 @@ class SalesforceAuthPassword(SalesforceAuth):
 
         self._access_token, host = login
         self._instance_url = "https://" + host
+
+
+class SalesforceAuthJWT(SalesforceAuth):
+    # Re-login periodically; Salesforce access tokens default to ~2h but org policy can shorten it.
+    LOGIN_REFRESH_PERIOD = 1800
+    JWT_LIFETIME_SECONDS = 300
+
+    @property
+    def _audience(self):
+        if self.is_sandbox:
+            return "https://test.salesforce.com"
+        return "https://login.salesforce.com"
+
+    @property
+    def _login_url(self):
+        if self.is_sandbox:
+            return "https://test.salesforce.com/services/oauth2/token"
+        return "https://login.salesforce.com/services/oauth2/token"
+
+    def _build_assertion(self):
+        claims = {
+            "iss": self._credentials.jwt_client_id,
+            "sub": self._credentials.jwt_username,
+            "aud": self._audience,
+            "exp": int(time.time()) + self.JWT_LIFETIME_SECONDS,
+        }
+        return jwt.encode(claims, self._credentials.jwt_private_key, algorithm="RS256")
+
+    def login(self):
+        resp = None
+        try:
+            LOGGER.info("Attempting login via OAuth2 JWT Bearer")
+
+            resp = requests.post(
+                self._login_url,
+                data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                    "assertion": self._build_assertion(),
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+            resp.raise_for_status()
+            auth = resp.json()
+
+            LOGGER.info("OAuth2 JWT Bearer login successful")
+            self._access_token = auth["access_token"]
+            self._instance_url = auth["instance_url"]
+        except Exception as e:
+            error_message = str(e)
+            if resp is not None:
+                error_message = error_message + f", Response from Salesforce: {resp.text}"
+            raise Exception(error_message) from e
+        finally:
+            LOGGER.info("Starting new login timer")
+            self.login_timer = threading.Timer(self.LOGIN_REFRESH_PERIOD, self.login)
+            self.login_timer.daemon = True
+            self.login_timer.start()
