@@ -21,9 +21,27 @@ def parse_credentials(config):
     for cls in (JWTCredentials, OAuthCredentials, PasswordCredentials):
         creds = cls(*(config.get(key) for key in cls._fields))
         if all(creds):
+            _validate_api_type(creds, config.get("api_type"))
             return creds
 
     raise Exception("Cannot create credentials from config.")
+
+
+def _validate_api_type(creds, api_type):
+    # Bulk API 1.0 (`/services/async/...`) authenticates via X-SFDC-Session, which
+    # requires a SOAP-style session id. The OAuth2 JWT Bearer flow never mints one,
+    # so combining JWTCredentials with api_type="BULK" results in InvalidSessionId
+    # errors on every stream at job-create time. Bulk 2.0 uses Bearer tokens and
+    # works fine. Fail fast with a clear message rather than letting the run die
+    # later mid-sync.
+    if isinstance(creds, JWTCredentials) and (api_type or "").upper() == "BULK":
+        raise Exception(
+            "Configuration conflict: api_type='BULK' (Bulk API 1.0) is not "
+            "compatible with OAuth2 JWT Bearer authentication. Bulk 1.0 requires "
+            "a SOAP session id, which JWT bearer does not issue. "
+            "Use api_type='BULK2' (recommended) or 'REST' instead, or switch "
+            "to password-based authentication if you must use Bulk 1.0."
+        )
 
 
 class SalesforceAuth:

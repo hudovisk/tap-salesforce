@@ -67,6 +67,10 @@ pip install git+https://github.com/MeltanoLabs/tap-salesforce.git
 
 When multiple credential types are present in the config, the tap chooses in this order: JWT → OAuth refresh-token → username/password.
 
+> **JWT bearer is incompatible with `api_type: BULK`.** Bulk API 1.0 (`/services/async/...`) authenticates via an `X-SFDC-Session` header that requires a SOAP-style session id. The OAuth2 JWT Bearer flow never issues one, so JWT logins succeed but every stream then fails with `InvalidSessionId` at job-create time. Use **`api_type: BULK2`** (Bulk 2.0 uses `Authorization: Bearer`) or `REST` when authenticating with JWT. The tap will refuse to start if it detects this combination.
+
+> **Meltano users:** the [meltano/hub plugin definition](https://github.com/meltano/hub/blob/main/_data/meltano/extractors/tap-salesforce/meltanolabs.yml) added `BULK2` to the `api_type` options some time after this tap began supporting it. If you locked the plugin before that hub update, your local `plugins/extractors/tap-salesforce--meltanolabs.lock` may still list only `REST` and `BULK`, and Meltano will reject `BULK2` at config-validation time with `'BULK2' is not a valid choice for 'api_type'`. Refresh the lockfile with `meltano lock --update --plugin-type extractor tap-salesforce`.
+
 **Optional**
 ```
 {
